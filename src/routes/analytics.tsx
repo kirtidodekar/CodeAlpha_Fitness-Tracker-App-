@@ -1,12 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { collection, getDocs, query, where, orderBy } from "firebase/firestore";
+import { listFitnessHistory, listUserCalorieLogs, listUserWorkouts } from "@/integrations/firebase/persistence";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from "recharts";
 import { format, subDays, eachDayOfInterval } from "date-fns";
-import type { Workout, CalorieLog, FitnessData } from "@/integrations/firebase/types";
 
 export const Route = createFileRoute("/analytics")({
   head: () => ({ meta: [{ title: "Analytics — FitTrack Pro" }, { name: "description", content: "Your fitness progress over time." }] }),
@@ -25,47 +23,28 @@ function AnalyticsPage() {
   const { user } = useAuth();
   const start = format(subDays(new Date(), 29), "yyyy-MM-dd");
 
-  const { data: workouts } = useQuery({
+  const { data: workouts, isLoading: workoutsLoading, error: workoutsError } = useQuery({
     queryKey: ["analytics-workouts", user?.uid],
     enabled: !!user,
     queryFn: async () => {
-      const q = query(
-        collection(db, "workouts"),
-        where("user_id", "==", user!.uid),
-        where("workout_date", ">=", start)
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Workout));
+      const rows = await listUserWorkouts(user!.uid);
+      return rows.filter((w) => w.workout_date >= start);
     },
   });
 
-  const { data: cals } = useQuery({
+  const { data: cals, isLoading: calsLoading, error: calsError } = useQuery({
     queryKey: ["analytics-cals", user?.uid],
     enabled: !!user,
     queryFn: async () => {
-      const q = query(
-        collection(db, "calorie_logs"),
-        where("user_id", "==", user!.uid),
-        where("log_date", ">=", start)
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CalorieLog));
+      const rows = await listUserCalorieLogs(user!.uid);
+      return rows.filter((c) => c.log_date >= start);
     },
   });
 
-  const { data: fitness } = useQuery({
+  const { data: fitness, isLoading: fitnessLoading, error: fitnessError } = useQuery({
     queryKey: ["analytics-fitness", user?.uid],
     enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "fitness_data"),
-        where("user_id", "==", user!.uid),
-        where("log_date", ">=", start),
-        orderBy("log_date", "asc")
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as FitnessData));
-    },
+    queryFn: async () => listFitnessHistory(user!.uid, start),
   });
 
   const days = eachDayOfInterval({ start: subDays(new Date(), 6), end: new Date() });
@@ -93,6 +72,9 @@ function AnalyticsPage() {
           <h1 className="font-display text-3xl font-bold">Progress <span className="gradient-text">Analytics</span></h1>
           <p className="text-sm text-muted-foreground">Last 30 days of activity</p>
         </header>
+
+        {(workoutsLoading || calsLoading || fitnessLoading) && <p className="text-sm text-muted-foreground">Restoring your progress history…</p>}
+        {(workoutsError || calsError || fitnessError) && <p className="text-sm text-destructive">Unable to restore all analytics data right now.</p>}
 
         <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <Stat label="Workouts" value={totalWorkouts} />

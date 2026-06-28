@@ -4,7 +4,19 @@ import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 
 type ServerEntry = {
-  fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
+  fetch: (request: Request, env?: unknown, ctx?: unknown) => Promise<Response> | Response;
+};
+
+type NodeRequest = {
+  url?: string;
+  method?: string;
+  headers: Record<string, string | string[]>;
+};
+
+type NodeResponse = {
+  statusCode?: number;
+  setHeader: (name: string, value: string) => void;
+  end: (data?: string | Uint8Array) => void;
 };
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
@@ -44,6 +56,10 @@ async function handleRequest(request: Request): Promise<Response> {
 
   try {
     const handler = await getServerEntry();
+    if (typeof handler?.fetch !== "function") {
+      throw new Error("The TanStack Start server entry did not expose a fetch handler.");
+    }
+
     const response = await handler.fetch(request, undefined, undefined);
     return await normalizeCatastrophicSsrResponse(response);
   } catch (error) {
@@ -55,13 +71,13 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 }
 
-export default async function handler(req: { url?: string; method?: string; headers: Record<string, string | string[]>; }, res: { statusCode?: number; setHeader: (name: string, value: string) => void; end: (data?: string | Uint8Array) => void; }) {
+async function handleNodeRequest(req: NodeRequest, res: NodeResponse) {
   const host = (req.headers.host as string) || "localhost";
   const url = new URL(req.url ?? "/", `https://${host}`);
   const request = new Request(url.toString(), {
     method: req.method,
     headers: req.headers as HeadersInit,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req as any),
+    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req as BodyInit),
   });
 
   const response = await handleRequest(request);
@@ -78,3 +94,23 @@ export default async function handler(req: { url?: string; method?: string; head
     res.end();
   }
 }
+
+const serverHandler = Object.assign(
+  async function serverHandler(input: Request | NodeRequest, maybeRes?: NodeResponse) {
+    if (input instanceof Request) {
+      return handleRequest(input);
+    }
+
+    if (maybeRes) {
+      return handleNodeRequest(input, maybeRes);
+    }
+
+    throw new TypeError("Expected a Request object or a Node request/response pair.");
+  },
+  {
+    fetch: (request: Request) => handleRequest(request),
+  },
+);
+
+export default serverHandler;
+export { handleNodeRequest as handler };

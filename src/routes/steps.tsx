@@ -3,13 +3,11 @@ import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { ProgressRing } from "@/components/ProgressRing";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, serverTimestamp } from "firebase/firestore";
+import { getDashboardStats, getDailyFitnessSnapshot, getUserProfile, upsertDailyFitnessSnapshot, upsertDashboardStats } from "@/integrations/firebase/persistence";
 import { Footprints, Award, Plus, Minus, Droplets } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import type { FitnessData, Profile } from "@/integrations/firebase/types";
 
 export const Route = createFileRoute("/steps")({
   head: () => ({ meta: [{ title: "Steps — FitTrack Pro" }, { name: "description", content: "Track your daily steps and water intake." }] }),
@@ -23,29 +21,15 @@ function StepsPage() {
   const [steps, setSteps] = useState(0);
   const [water, setWater] = useState(0);
 
-  const { data } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["fitness-today", user?.uid, today],
     enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "fitness_data"),
-        where("user_id", "==", user!.uid),
-        where("log_date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-      if (snapshot.empty) return null;
-      const docSnap = snapshot.docs[0];
-      return { id: docSnap.id, ...docSnap.data() } as FitnessData;
-    },
+    queryFn: async () => getDailyFitnessSnapshot(user!.uid, today),
   });
 
   const { data: profile } = useQuery({
     queryKey: ["profile", user?.uid], enabled: !!user,
-    queryFn: async () => {
-      const docRef = doc(db, "profiles", user!.uid);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } as Profile : null;
-    },
+    queryFn: async () => getUserProfile(user!.uid),
   });
 
   useEffect(() => {
@@ -57,36 +41,18 @@ function StepsPage() {
 
   async function persist(newSteps: number, newWater: number) {
     if (!user) return;
-    // Find existing fitness data for today or create new
-    const q = query(
-      collection(db, "fitness_data"),
-      where("user_id", "==", user.uid),
-      where("log_date", "==", today)
-    );
-    const snapshot = await getDocs(q);
-    
-    if (snapshot.empty) {
-      // Create new document
-      const newDocRef = doc(collection(db, "fitness_data"));
-      await setDoc(newDocRef, {
-        id: newDocRef.id,
-        user_id: user.uid,
-        log_date: today,
-        steps: newSteps,
-        water_intake: newWater,
-        created_at: serverTimestamp(),
-        updated_at: serverTimestamp(),
-      });
-    } else {
-      // Update existing document
-      const docRef = snapshot.docs[0].ref;
-      await updateDoc(docRef, {
-        steps: newSteps,
-        water_intake: newWater,
-        updated_at: serverTimestamp(),
-      });
-    }
+    const saved = await upsertDailyFitnessSnapshot(user.uid, today, { steps: newSteps, water_intake: newWater });
+    const existingStats = await getDashboardStats(user.uid, today);
+    await upsertDashboardStats(user.uid, today, {
+      steps: saved.steps ?? newSteps,
+      water_intake: saved.water_intake ?? newWater,
+      weight: existingStats?.weight ?? null,
+      workout_minutes: existingStats?.workout_minutes ?? null,
+      calories_burned: existingStats?.calories_burned ?? null,
+      calories_consumed: existingStats?.calories_consumed ?? null,
+    });
     qc.invalidateQueries({ queryKey: ["fitness-today"] });
+    qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
   }
 
   async function setStepCount(v: number) {
@@ -111,6 +77,8 @@ function StepsPage() {
     <AppShell>
       <div className="space-y-6">
         <section className="glass-card animate-fade-up rounded-3xl p-8 text-center">
+          {isLoading && <p className="mb-4 text-sm text-muted-foreground">Loading your saved activity…</p>}
+          {error && <p className="mb-4 text-sm text-destructive">Unable to load your saved step data right now.</p>}
           <div className="flex justify-center">
             <ProgressRing value={steps} max={goal} size={260} stroke={20} color="var(--color-primary)"
               label={steps.toLocaleString()} sub={`of ${goal.toLocaleString()} steps`} />

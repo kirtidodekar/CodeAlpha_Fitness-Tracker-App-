@@ -2,13 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { collection, addDoc, deleteDoc, doc, getDoc, getDocs, query, where, orderBy, serverTimestamp } from "firebase/firestore";
+import { deleteCalorieLog, getDashboardStats, getUserProfile, listUserCalorieLogs, saveCalorieLog, upsertDashboardStats } from "@/integrations/firebase/persistence";
 import { UtensilsCrossed, Coffee, Sun, Moon, Cookie, Trash2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import type { CalorieLog, Profile } from "@/integrations/firebase/types";
 
 type Meal = "breakfast" | "lunch" | "dinner" | "snacks";
 
@@ -31,28 +29,15 @@ function CaloriesPage() {
   const [form, setForm] = useState<{ food_name: string; calories: string; meal_type: Meal }>({ food_name: "", calories: "", meal_type: "breakfast" });
   const [saving, setSaving] = useState(false);
 
-  const { data: logs } = useQuery({
+  const { data: logs, isLoading, error } = useQuery({
     queryKey: ["calorie_logs", user?.uid, today],
     enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "calorie_logs"),
-        where("user_id", "==", user!.uid),
-        where("log_date", "==", today),
-        orderBy("created_at", "asc")
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CalorieLog));
-    },
+    queryFn: async () => (await listUserCalorieLogs(user!.uid)).filter((log) => log.log_date === today),
   });
 
   const { data: profile } = useQuery({
     queryKey: ["profile", user?.uid], enabled: !!user,
-    queryFn: async () => {
-      const docRef = doc(db, "profiles", user!.uid);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } as Profile : null;
-    },
+    queryFn: async () => getUserProfile(user!.uid),
   });
 
   async function save(e: React.FormEvent) {
@@ -60,18 +45,29 @@ function CaloriesPage() {
     if (!user) return;
     setSaving(true);
     try {
-      await addDoc(collection(db, "calorie_logs"), {
-        user_id: user.uid,
+      const calories = Number(form.calories);
+      await saveCalorieLog(user.uid, {
         food_name: form.food_name,
-        calories: Number(form.calories),
+        calories,
         meal_type: form.meal_type,
         log_date: today,
-        created_at: serverTimestamp(),
       });
+
+      const existingStats = await getDashboardStats(user.uid, today);
+      await upsertDashboardStats(user.uid, today, {
+        steps: existingStats?.steps ?? null,
+        water_intake: existingStats?.water_intake ?? null,
+        weight: existingStats?.weight ?? null,
+        workout_minutes: existingStats?.workout_minutes ?? null,
+        calories_burned: existingStats?.calories_burned ?? null,
+        calories_consumed: (existingStats?.calories_consumed ?? 0) + calories,
+      });
+
       toast.success("Added");
       setForm({ ...form, food_name: "", calories: "" });
       qc.invalidateQueries({ queryKey: ["calorie_logs"] });
       qc.invalidateQueries({ queryKey: ["cal-today"] });
+      qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
     } catch (err: any) {
       toast.error(err.message ?? "Failed to add calorie log");
     } finally {
@@ -81,9 +77,10 @@ function CaloriesPage() {
 
   async function remove(id: string) {
     try {
-      await deleteDoc(doc(db, "calorie_logs", id));
+      await deleteCalorieLog(id);
       qc.invalidateQueries({ queryKey: ["calorie_logs"] });
       qc.invalidateQueries({ queryKey: ["cal-today"] });
+      qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
     } catch (err: any) {
       toast.error(err.message ?? "Failed to delete calorie log");
     }
@@ -128,6 +125,9 @@ function CaloriesPage() {
             </button>
           </form>
         </section>
+
+        {isLoading && <p className="text-sm text-muted-foreground">Loading your calorie history…</p>}
+        {error && <p className="text-sm text-destructive">Unable to load calorie history right now.</p>}
 
         <section className="grid gap-4 md:grid-cols-2">
           {MEALS.map((m, i) => {

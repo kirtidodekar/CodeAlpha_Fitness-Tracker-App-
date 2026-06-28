@@ -2,13 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { collection, addDoc, deleteDoc, doc, getDocs, query, where, orderBy, serverTimestamp } from "firebase/firestore";
+import { deleteWorkout, getDashboardStats, listUserWorkouts, saveWorkout, upsertDashboardStats } from "@/integrations/firebase/persistence";
 import { Dumbbell, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import type { Workout } from "@/integrations/firebase/types";
 
 export const Route = createFileRoute("/workouts")({
   head: () => ({ meta: [{ title: "Workouts — FitTrack Pro" }, { name: "description", content: "Log and track your workouts." }] }),
@@ -20,22 +18,14 @@ const TYPES = ["Cardio", "Strength", "HIIT", "Yoga", "Cycling", "Running", "Swim
 function WorkoutsPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
+  const today = format(new Date(), "yyyy-MM-dd");
   const [form, setForm] = useState({ workout_name: "", workout_type: "Cardio", duration_minutes: "", calories_burned: "", notes: "" });
   const [saving, setSaving] = useState(false);
 
-  const { data: workouts } = useQuery({
+  const { data: workouts, isLoading, error } = useQuery({
     queryKey: ["workouts", user?.uid],
     enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "workouts"),
-        where("user_id", "==", user!.uid),
-        orderBy("workout_date", "desc"),
-        orderBy("created_at", "desc")
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Workout));
-    },
+    queryFn: async () => listUserWorkouts(user!.uid),
   });
 
   async function save(e: React.FormEvent) {
@@ -43,21 +33,33 @@ function WorkoutsPage() {
     if (!user) return;
     setSaving(true);
     try {
-      await addDoc(collection(db, "workouts"), {
-        user_id: user.uid,
+      const duration = Number(form.duration_minutes);
+      const calories = Number(form.calories_burned || 0);
+      await saveWorkout(user.uid, {
         workout_name: form.workout_name,
         workout_type: form.workout_type,
-        duration_minutes: Number(form.duration_minutes),
-        calories_burned: Number(form.calories_burned || 0),
+        duration_minutes: duration,
+        calories_burned: calories,
         notes: form.notes || null,
-        workout_date: format(new Date(), "yyyy-MM-dd"),
-        created_at: serverTimestamp(),
+        workout_date: today,
       });
+
+      const existingStats = await getDashboardStats(user.uid, today);
+      await upsertDashboardStats(user.uid, today, {
+        steps: existingStats?.steps ?? null,
+        water_intake: existingStats?.water_intake ?? null,
+        weight: existingStats?.weight ?? null,
+        workout_minutes: (existingStats?.workout_minutes ?? 0) + duration,
+        calories_burned: (existingStats?.calories_burned ?? 0) + calories,
+        calories_consumed: existingStats?.calories_consumed ?? null,
+      });
+
       toast.success("Workout saved! 💪");
       setForm({ workout_name: "", workout_type: "Cardio", duration_minutes: "", calories_burned: "", notes: "" });
       qc.invalidateQueries({ queryKey: ["workouts"] });
       qc.invalidateQueries({ queryKey: ["workouts-today"] });
       qc.invalidateQueries({ queryKey: ["week-workouts"] });
+      qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
     } catch (err: any) {
       toast.error(err.message ?? "Failed to save workout");
     } finally {
@@ -67,9 +69,10 @@ function WorkoutsPage() {
 
   async function remove(id: string) {
     try {
-      await deleteDoc(doc(db, "workouts", id));
+      await deleteWorkout(id);
       toast.success("Removed");
       qc.invalidateQueries({ queryKey: ["workouts"] });
+      qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
     } catch (err: any) {
       toast.error(err.message ?? "Failed to delete workout");
     }
@@ -113,8 +116,10 @@ function WorkoutsPage() {
 
         <section>
           <h3 className="mb-3 font-display text-lg font-bold">History</h3>
+          {isLoading && <p className="mb-3 text-sm text-muted-foreground">Loading saved workouts…</p>}
+          {error && <p className="mb-3 text-sm text-destructive">Unable to load workout history right now.</p>}
           <div className="space-y-3">
-            {workouts?.length === 0 && <p className="glass-card rounded-2xl p-6 text-center text-sm text-muted-foreground">No workouts yet — log your first session!</p>}
+            {!isLoading && !error && workouts?.length === 0 && <p className="glass-card rounded-2xl p-6 text-center text-sm text-muted-foreground">No workouts yet — log your first session!</p>}
             {workouts?.map((w, i) => (
               <div key={w.id}
                 className="glass-card animate-fade-up flex items-center justify-between gap-3 rounded-2xl p-4"

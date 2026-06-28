@@ -44,3 +44,17 @@ export interface CalorieLog {
   log_date: string;
   created_at: string;
 }
+
+export interface DashboardStats {
+  id: string;
+  user_id: string;
+  log_date: string;
+  steps: number | null;
+  water_intake: number | null;
+  weight: number | null;
+  workout_minutes: number | null;
+  calories_burned: number | null;
+  calories_consumed: number | null;
+  created_at: string;
+  updated_at: string;
+}

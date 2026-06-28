@@ -2,13 +2,11 @@ import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { doc, getDoc, updateDoc, setDoc, collection, query, where, getDocs, serverTimestamp } from "firebase/firestore";
+import { ensureUserProfile, getDashboardStats, getDailyFitnessSnapshot, getUserProfile, upsertDailyFitnessSnapshot, upsertDashboardStats } from "@/integrations/firebase/persistence";
 import { LogOut, Scale, Bell, Moon, Target, Calculator } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import type { Profile, FitnessData } from "@/integrations/firebase/types";
 
 export const Route = createFileRoute("/profile")({
   head: () => ({ meta: [{ title: "Profile — FitTrack Pro" }, { name: "description", content: "Manage your profile and fitness goals." }] }),
@@ -21,27 +19,13 @@ function ProfilePage() {
   const qc = useQueryClient();
   const today = format(new Date(), "yyyy-MM-dd");
 
-  const { data: profile } = useQuery({
+  const { data: profile, isLoading: profileLoading, error: profileError } = useQuery({
     queryKey: ["profile", user?.uid], enabled: !!user,
-    queryFn: async () => {
-      const docRef = doc(db, "profiles", user!.uid);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } as Profile : null;
-    },
+    queryFn: async () => getUserProfile(user!.uid),
   });
   const { data: todayFitness } = useQuery({
     queryKey: ["fitness-today", user?.uid, today], enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "fitness_data"),
-        where("user_id", "==", user!.uid),
-        where("log_date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-      if (snapshot.empty) return null;
-      const docSnap = snapshot.docs[0];
-      return { id: docSnap.id, ...docSnap.data() } as FitnessData;
-    },
+    queryFn: async () => getDailyFitnessSnapshot(user!.uid, today),
   });
 
   const [form, setForm] = useState({ full_name: "", daily_step_goal: 10000, daily_calorie_goal: 2000, daily_water_goal: 8, weight_goal: "" });
@@ -63,17 +47,16 @@ function ProfilePage() {
   async function saveProfile() {
     if (!user) return;
     try {
-      const profileRef = doc(db, "profiles", user.uid);
-      await updateDoc(profileRef, {
+      await ensureUserProfile(user.uid, {
         full_name: form.full_name,
         daily_step_goal: form.daily_step_goal,
         daily_calorie_goal: form.daily_calorie_goal,
         daily_water_goal: form.daily_water_goal,
         weight_goal: form.weight_goal ? Number(form.weight_goal) : null,
-        updated_at: serverTimestamp(),
       });
       toast.success("Profile saved");
       qc.invalidateQueries({ queryKey: ["profile"] });
+      qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
     } catch (err: any) {
       toast.error(err.message ?? "Failed to save profile");
     }
@@ -81,36 +64,21 @@ function ProfilePage() {
 
   async function saveWeight() {
     if (!user || !weight) return;
-    // Find existing fitness data for today or create new
-    const q = query(
-      collection(db, "fitness_data"),
-      where("user_id", "==", user.uid),
-      where("log_date", "==", today)
-    );
-    const snapshot = await getDocs(q);
-    
-    if (snapshot.empty) {
-      // Create new document
-      const newDocRef = doc(collection(db, "fitness_data"));
-      await setDoc(newDocRef, {
-        id: newDocRef.id,
-        user_id: user.uid,
-        log_date: today,
-        weight: Number(weight),
-        created_at: serverTimestamp(),
-        updated_at: serverTimestamp(),
-      });
-    } else {
-      // Update existing document
-      const docRef = snapshot.docs[0].ref;
-      await updateDoc(docRef, {
-        weight: Number(weight),
-        updated_at: serverTimestamp(),
-      });
-    }
+    const numericWeight = Number(weight);
+    const saved = await upsertDailyFitnessSnapshot(user.uid, today, { weight: numericWeight });
+    const existingStats = await getDashboardStats(user.uid, today);
+    await upsertDashboardStats(user.uid, today, {
+      steps: existingStats?.steps ?? saved.steps ?? null,
+      water_intake: existingStats?.water_intake ?? saved.water_intake ?? null,
+      weight: numericWeight,
+      workout_minutes: existingStats?.workout_minutes ?? null,
+      calories_burned: existingStats?.calories_burned ?? null,
+      calories_consumed: existingStats?.calories_consumed ?? null,
+    });
     toast.success("Weight logged");
     qc.invalidateQueries({ queryKey: ["fitness-today"] });
     qc.invalidateQueries({ queryKey: ["analytics-fitness"] });
+    qc.invalidateQueries({ queryKey: ["dashboard-stats"] });
   }
 
   const bmi = weight && height ? (Number(weight) / ((Number(height) / 100) ** 2)).toFixed(1) : null;
@@ -130,6 +98,9 @@ function ProfilePage() {
             </div>
           </div>
         </section>
+
+        {profileLoading && <p className="text-sm text-muted-foreground">Loading your saved profile…</p>}
+        {profileError && <p className="text-sm text-destructive">Unable to load your saved profile right now.</p>}
 
         <section className="glass-card animate-fade-up rounded-3xl p-6">
           <h3 className="font-display text-lg font-bold flex items-center gap-2"><Target className="h-5 w-5 text-primary" /> Profile & Goals</h3>

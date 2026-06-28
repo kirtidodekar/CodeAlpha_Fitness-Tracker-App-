@@ -2,13 +2,11 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { ProgressRing } from "@/components/ProgressRing";
-import { db } from "@/integrations/firebase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { collection, doc, getDoc, getDocs, query, where, orderBy, Timestamp } from "firebase/firestore";
+import { getDashboardStats, getDailyFitnessSnapshot, getUserProfile, listUserCalorieLogs, listUserWorkouts } from "@/integrations/firebase/persistence";
 import { Footprints, Flame, Timer, Droplets, Dumbbell, UtensilsCrossed, Plus, Scale, Quote } from "lucide-react";
 import { BarChart, Bar, XAxis, ResponsiveContainer, Tooltip, Cell } from "recharts";
 import { format, subDays, startOfWeek, addDays } from "date-fns";
-import type { Profile, FitnessData, Workout, CalorieLog } from "@/integrations/firebase/types";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({ meta: [{ title: "Dashboard — FitTrack Pro" }, { name: "description", content: "Your daily fitness overview." }] }),
@@ -27,80 +25,57 @@ function Dashboard() {
   const { user } = useAuth();
   const today = format(new Date(), "yyyy-MM-dd");
 
-  const { data: profile } = useQuery({
+  const { data: profile, isLoading: profileLoading, error: profileError } = useQuery({
     queryKey: ["profile", user?.uid],
     enabled: !!user,
-    queryFn: async () => {
-      const docRef = doc(db, "profiles", user!.uid);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } as Profile : null;
-    },
+    queryFn: async () => getUserProfile(user!.uid),
   });
 
-  const { data: todayData } = useQuery({
+  const { data: todayData, isLoading: todayLoading, error: todayError } = useQuery({
     queryKey: ["fitness-today", user?.uid, today],
     enabled: !!user,
-    queryFn: async () => {
-      const q = query(
-        collection(db, "fitness_data"),
-        where("user_id", "==", user!.uid),
-        where("log_date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-      if (snapshot.empty) return null;
-      const docSnap = snapshot.docs[0];
-      return { id: docSnap.id, ...docSnap.data() } as FitnessData;
-    },
+    queryFn: async () => getDailyFitnessSnapshot(user!.uid, today),
   });
 
-  const { data: todayWorkouts } = useQuery({
+  const { data: todayWorkouts, isLoading: workoutsLoading, error: workoutsError } = useQuery({
     queryKey: ["workouts-today", user?.uid, today],
     enabled: !!user,
     queryFn: async () => {
-      const q = query(
-        collection(db, "workouts"),
-        where("user_id", "==", user!.uid),
-        where("workout_date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Workout));
+      const workouts = await listUserWorkouts(user!.uid);
+      return workouts.filter((w) => w.workout_date === today);
     },
   });
 
-  const { data: todayCalories } = useQuery({
+  const { data: todayCalories, isLoading: calsLoading, error: calsError } = useQuery({
     queryKey: ["cal-today", user?.uid, today],
     enabled: !!user,
     queryFn: async () => {
-      const q = query(
-        collection(db, "calorie_logs"),
-        where("user_id", "==", user!.uid),
-        where("log_date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CalorieLog));
+      const logs = await listUserCalorieLogs(user!.uid);
+      return logs.filter((c) => c.log_date === today);
     },
+  });
+
+  const { data: persistedStats, isLoading: statsLoading, error: statsError } = useQuery({
+    queryKey: ["dashboard-stats", user?.uid, today],
+    enabled: !!user,
+    queryFn: async () => getDashboardStats(user!.uid, today),
   });
 
   const { data: weekly } = useQuery({
     queryKey: ["week-workouts", user?.uid],
     enabled: !!user,
     queryFn: async () => {
+      const workouts = await listUserWorkouts(user!.uid);
       const start = format(subDays(new Date(), 6), "yyyy-MM-dd");
-      const q = query(
-        collection(db, "workouts"),
-        where("user_id", "==", user!.uid),
-        where("workout_date", ">=", start)
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Workout));
+      return workouts.filter((w) => w.workout_date >= start);
     },
   });
 
-  const steps = todayData?.steps ?? 0;
-  const water = todayData?.water_intake ?? 0;
-  const workoutMins = (todayWorkouts ?? []).reduce((s, w) => s + (w.duration_minutes ?? 0), 0);
-  const caloriesBurned = (todayWorkouts ?? []).reduce((s, w) => s + (w.calories_burned ?? 0), 0);
-  const caloriesEaten = (todayCalories ?? []).reduce((s, c) => s + (c.calories ?? 0), 0);
+  const steps = todayData?.steps ?? persistedStats?.steps ?? 0;
+  const water = todayData?.water_intake ?? persistedStats?.water_intake ?? 0;
+  const workoutMins = persistedStats?.workout_minutes ?? (todayWorkouts ?? []).reduce((s, w) => s + (w.duration_minutes ?? 0), 0);
+  const caloriesBurned = persistedStats?.calories_burned ?? (todayWorkouts ?? []).reduce((s, w) => s + (w.calories_burned ?? 0), 0);
+  const caloriesEaten = persistedStats?.calories_consumed ?? (todayCalories ?? []).reduce((s, c) => s + (c.calories ?? 0), 0);
 
   const stepGoal = profile?.daily_step_goal ?? 10000;
   const waterGoal = profile?.daily_water_goal ?? 8;
@@ -135,7 +110,9 @@ function Dashboard() {
   return (
     <AppShell>
       <div className="space-y-6">
-        {/* Welcome */}
+        {(profileLoading || todayLoading || workoutsLoading || calsLoading || statsLoading) && <p className="text-sm text-muted-foreground">Loading your saved fitness data…</p>}
+        {(profileError || todayError || workoutsError || calsError || statsError) && <p className="text-sm text-destructive">Some saved data could not be restored right now.</p>}
+
         <section className="animate-fade-up grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4">
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">{format(new Date(), "EEEE, MMM d")}</p>
@@ -146,7 +123,6 @@ function Dashboard() {
           </Link>
         </section>
 
-        {/* Stats */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
           {stats.map((s, i) => (
             <div key={s.label}
@@ -164,7 +140,6 @@ function Dashboard() {
           ))}
         </section>
 
-        {/* Goals + Quote */}
         <section className="grid gap-4 md:grid-cols-3">
           <div className="glass-card animate-fade-up rounded-3xl p-6 md:col-span-2">
             <h3 className="font-display text-lg font-bold">Today's Goals</h3>
@@ -191,7 +166,6 @@ function Dashboard() {
           </div>
         </section>
 
-        {/* Weekly chart */}
         <section className="glass-card animate-fade-up rounded-3xl p-6">
           <div className="flex items-center justify-between">
             <h3 className="font-display text-lg font-bold">Weekly Activity</h3>
@@ -211,7 +185,6 @@ function Dashboard() {
           </div>
         </section>
 
-        {/* Quick actions */}
         <section>
           <h3 className="mb-3 font-display text-lg font-bold">Quick Actions</h3>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
